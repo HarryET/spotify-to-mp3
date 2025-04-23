@@ -24,17 +24,20 @@ const isVercelEnvironment = !!process.env.VERCEL
 
 // Helper function for the yt-dlp fallback
 async function downloadWithYtDlp(videoId: string, requestId: string): Promise<DownloadResult | null> {
-  console.log(`[API:transcode][${requestId}] Attempting final fallback using yt-dlp CLI...`)
+  console.log(`[API:transcode][${requestId}] Attempting final fallback using yt-dlp CLI (via PATH)...`)
   const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`
+  const command = 'yt-dlp' // Rely on PATH to find the executable
+  
   const args = [
-    '--format', 'bestaudio', // Get the best audio format
-    '--output', '-',         // Pipe output to stdout
+    '--format', 'bestaudio', 
+    '--output', '-',         
     youtubeUrl
   ]
 
   return new Promise((resolve, reject) => {
-    console.log(`[API:transcode][${requestId}] Spawning yt-dlp: ${YT_DLP_PATH} ${args.join(' ')}`)
-    const ytDlpProcess = spawn(YT_DLP_PATH, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    console.log(`[API:transcode][${requestId}] Spawning: ${command} ${args.join(' ')}`)
+    // Spawn yt-dlp directly, letting the system find it via PATH
+    const ytDlpProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
 
     const chunks: Buffer[] = []
     let errorOutput = ''
@@ -50,27 +53,25 @@ async function downloadWithYtDlp(videoId: string, requestId: string): Promise<Do
     ytDlpProcess.on('close', (code) => {
       if (code === 0) {
         if (chunks.length === 0) {
-          console.error(`[API:transcode][${requestId}] yt-dlp exited successfully but produced no output.`)
+          console.error(`[API:transcode][${requestId}] yt-dlp (via PATH) exited successfully but produced no output.`)
           return reject(new Error('yt-dlp produced no output'))
         }
         const buffer = Buffer.concat(chunks)
-        console.log(`[API:transcode][${requestId}] yt-dlp succeeded, received ${buffer.length} bytes.`)
-        // yt-dlp default best audio is often opus/webm, but browsers handle mpeg better
-        // We could add ffprobe or similar to detect, but 'audio/mpeg' is a safe bet
+        console.log(`[API:transcode][${requestId}] yt-dlp (via PATH) succeeded, received ${buffer.length} bytes.`)
         resolve({
           buffer,
           size: buffer.length,
-          mimeType: 'audio/mpeg'
+          mimeType: 'audio/mpeg' 
         })
       } else {
-        console.error(`[API:transcode][${requestId}] yt-dlp process exited with code ${code}. Error: ${errorOutput}`)
-        reject(new Error(`yt-dlp failed with code ${code}: ${errorOutput.trim() || 'Unknown error'}`))
+        console.error(`[API:transcode][${requestId}] yt-dlp (via PATH) process exited with code ${code}. Error: ${errorOutput}`)
+        reject(new Error(`yt-dlp (via PATH) failed with code ${code}: ${errorOutput.trim() || 'Unknown error'}`))
       }
     })
 
     ytDlpProcess.on('error', (err) => {
-      console.error(`[API:transcode][${requestId}] Failed to spawn yt-dlp process: ${err.message}`)
-      reject(new Error(`Failed to start yt-dlp: ${err.message}`))
+      console.error(`[API:transcode][${requestId}] Failed to spawn yt-dlp process (via PATH): ${err.message}`)
+      reject(new Error(`Failed to start yt-dlp (via PATH): ${err.message}`))
     })
   })
 }
