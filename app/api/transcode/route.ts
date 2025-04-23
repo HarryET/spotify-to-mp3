@@ -12,7 +12,7 @@ let ongoingRequests = 0
 const MAX_CONCURRENT = 5 // Maximum concurrent transcoding operations
 
 // Get yt-dlp path from environment or use default
-const YT_DLP_PATH = process.env.YT_DLP_PATH || '/opt/homebrew/bin/yt-dlp'
+const YT_DLP_PATH = process.env.YT_DLP_PATH || '/usr/local/bin/yt-dlp' // Ensure this matches Dockerfile
 
 // Configure cache for responses
 export const runtime = 'nodejs'
@@ -21,6 +21,65 @@ export const dynamic = 'force-dynamic'
 // Helper to check if we're on Vercel
 const isVercelProd = process.env.VERCEL_ENV === 'production'
 const isVercelEnvironment = !!process.env.VERCEL
+
+// Helper function for the yt-dlp fallback
+async function downloadWithYtDlp(videoId: string, requestId: string): Promise<DownloadResult | null> {
+  console.log(`[API:transcode][${requestId}] Attempting final fallback using yt-dlp CLI...`)
+  const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`
+  const args = [
+    '--format', 'bestaudio', // Get the best audio format
+    '--output', '-',         // Pipe output to stdout
+    youtubeUrl
+  ]
+
+  return new Promise((resolve, reject) => {
+    console.log(`[API:transcode][${requestId}] Spawning yt-dlp: ${YT_DLP_PATH} ${args.join(' ')}`)
+    const ytDlpProcess = spawn(YT_DLP_PATH, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+
+    const chunks: Buffer[] = []
+    let errorOutput = ''
+
+    ytDlpProcess.stdout.on('data', (chunk) => {
+      chunks.push(chunk)
+    })
+
+    ytDlpProcess.stderr.on('data', (chunk) => {
+      errorOutput += chunk.toString()
+    })
+
+    ytDlpProcess.on('close', (code) => {
+      if (code === 0) {
+        if (chunks.length === 0) {
+          console.error(`[API:transcode][${requestId}] yt-dlp exited successfully but produced no output.`)
+          return reject(new Error('yt-dlp produced no output'))
+        }
+        const buffer = Buffer.concat(chunks)
+        console.log(`[API:transcode][${requestId}] yt-dlp succeeded, received ${buffer.length} bytes.`)
+        // yt-dlp default best audio is often opus/webm, but browsers handle mpeg better
+        // We could add ffprobe or similar to detect, but 'audio/mpeg' is a safe bet
+        resolve({
+          buffer,
+          size: buffer.length,
+          mimeType: 'audio/mpeg'
+        })
+      } else {
+        console.error(`[API:transcode][${requestId}] yt-dlp process exited with code ${code}. Error: ${errorOutput}`)
+        reject(new Error(`yt-dlp failed with code ${code}: ${errorOutput.trim() || 'Unknown error'}`))
+      }
+    })
+
+    ytDlpProcess.on('error', (err) => {
+      console.error(`[API:transcode][${requestId}] Failed to spawn yt-dlp process: ${err.message}`)
+      reject(new Error(`Failed to start yt-dlp: ${err.message}`))
+    })
+  })
+}
+
+interface DownloadResult {
+  buffer: Buffer;
+  size: number;
+  mimeType: string;
+}
 
 // Handle transcoding requests with optimized resource usage
 export async function GET(req: NextRequest) {
@@ -63,85 +122,70 @@ export async function GET(req: NextRequest) {
     ongoingRequests++
     console.log(`[API:transcode][${requestId}] Incremented request counter to ${ongoingRequests}`)
     
+    let audioData: DownloadResult | null = null
+    const errors: string[] = []
+
     try {
-      let audioData;
-      
-      // First try the optimized transcoder
+      // 1. Try primary transcode (likely youtubei.js via @/lib/transcoder)
       try {
         console.log(`[API:transcode][${requestId}] Attempting primary transcode method...`)
-        // Import dynamically to reduce cold start time
         const { transcodeYouTubeVideo } = await import('@/lib/transcoder')
-        
-        // Get server config (throttling settings, etc)
         const config = getServerRuntimeConfig()
-        
-        // Apply throttling based on server config
         const throttledTranscode = throttle(transcodeYouTubeVideo, config.concurrentRequests || 2)
-        
-        // Get audio data with proper error handling
         audioData = await throttledTranscode(videoId)
         console.log(`[API:transcode][${requestId}] Primary transcode method succeeded`)
-      } catch (primaryError) {
-        // If the primary method fails, try the fallback method
-        console.error(`[API:transcode][${requestId}] Primary transcode failed:`, primaryError)
+      } catch (primaryError: any) {
+        console.error(`[API:transcode][${requestId}] Primary transcode failed:`, primaryError.message)
+        errors.push(`Primary failed: ${primaryError.message}`)
         
-        console.log(`[API:transcode][${requestId}] Attempting new direct downloader method...`)
-        
+        // 2. Try direct downloader (likely youtubei.js via @/lib/direct-downloader)
         try {
-          // Use our new direct downloader that doesn't rely on s-ytdl
+          console.log(`[API:transcode][${requestId}] Attempting direct downloader method...`)
           const { downloadWithFallback } = await import('@/lib/direct-downloader')
           audioData = await downloadWithFallback(videoId)
           console.log(`[API:transcode][${requestId}] Direct downloader method succeeded`)
-        } catch (directError) {
-          console.error(`[API:transcode][${requestId}] Direct downloader failed:`, directError)
-          
-          // As a last resort, try the old s-ytdl method, but catch any DNS errors
-          if (isVercelEnvironment) {
-            try {
-              console.log(`[API:transcode][${requestId}] Attempting fallback s-ytdl method...`)
-              
-              // Use the s-ytdl method as a fallback
-              const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`
-              const tempDir = path.join(os.tmpdir(), "fallback-transcode")
-              
-              if (!fs.existsSync(tempDir)) {
-                fs.mkdirSync(tempDir, { recursive: true })
-              }
-              
-              // Download using s-ytdl
-              const audioBuffer = await SYTDL.dl(youtubeUrl, "4", "audio")
-              console.log(`[API:transcode][${requestId}] s-ytdl download complete, size: ${audioBuffer.length}`)
-              
-              // We'll return the audio as-is since it's likely already in a compatible format
-              audioData = {
-                buffer: audioBuffer,
-                size: audioBuffer.length,
-                mimeType: 'audio/mpeg' // This might not be accurate, but browsers can usually detect the format
-              }
-              
-              console.log(`[API:transcode][${requestId}] Fallback method succeeded`)
-            } catch (sytdlError: any) {
-              // If we get a DNS error, send a more helpful error message
-              if (sytdlError.message && (
-                sytdlError.message.includes('ENOTFOUND') || 
-                sytdlError.message.includes('getaddrinfo')
-              )) {
-                console.error(`[API:transcode][${requestId}] DNS resolution error in s-ytdl:`, sytdlError)
-                throw new Error('Unable to resolve necessary domains. Please try the alternative download options.')
-              }
-              
-              // Otherwise just rethrow the original error
-              throw sytdlError
+        } catch (directError: any) {
+          console.error(`[API:transcode][${requestId}] Direct downloader failed:`, directError.message)
+          errors.push(`Direct downloader failed: ${directError.message}`)
+
+          // 3. Try s-ytdl
+          try {
+            console.log(`[API:transcode][${requestId}] Attempting fallback s-ytdl method...`)
+            const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`
+            const tempDir = path.join(os.tmpdir(), "fallback-transcode")
+            if (!fs.existsSync(tempDir)) {
+              fs.mkdirSync(tempDir, { recursive: true })
             }
-          } else {
-            // If not on Vercel, just rethrow the error
-            throw directError
-          }
+            const audioBuffer = await SYTDL.dl(youtubeUrl, "4", "audio")
+            console.log(`[API:transcode][${requestId}] s-ytdl download complete, size: ${audioBuffer.length}`)
+            audioData = {
+              buffer: audioBuffer,
+              size: audioBuffer.length,
+              mimeType: 'audio/mpeg' // Assume MPEG
+            }
+            console.log(`[API:transcode][${requestId}] s-ytdl method succeeded`)
+          } catch (sytdlError: any) {
+            console.error(`[API:transcode][${requestId}] s-ytdl failed:`, sytdlError.message)
+            errors.push(`s-ytdl failed: ${sytdlError.message}`)
+            
+            // 4. FINAL FALLBACK: Try yt-dlp CLI
+            try {
+              audioData = await downloadWithYtDlp(videoId, requestId)
+              console.log(`[API:transcode][${requestId}] yt-dlp CLI method succeeded`)
+            } catch (ytDlpError: any) {
+               console.error(`[API:transcode][${requestId}] yt-dlp CLI failed:`, ytDlpError.message)
+               errors.push(`yt-dlp CLI failed: ${ytDlpError.message}`)
+               // If all methods failed, throw a consolidated error
+               throw new Error(`All download methods failed: ${errors.join('; ')}`)
+            }
+          } 
         }
       }
       
-      if (!audioData || !audioData.buffer) {
-        throw new Error('Failed to transcode video - no audio data produced')
+      if (!audioData || !audioData.buffer || audioData.buffer.length === 0) {
+        // If audioData is somehow null/empty after all attempts, throw error
+        console.error(`[API:transcode][${requestId}] Failed to transcode video - no audio data produced after all fallbacks. Errors: ${errors.join('; ')}`)
+        throw new Error(`Failed to transcode video - no audio data produced. Errors: ${errors.join('; ')}`)
       }
       
       console.log(`[API:transcode][${requestId}] Returning ${audioData.buffer.length} bytes with Content-Type: ${audioData.mimeType}`)
@@ -161,17 +205,20 @@ export async function GET(req: NextRequest) {
       console.log(`[API:transcode][${requestId}] Decremented request counter to ${ongoingRequests}`)
     }
   } catch (error) {
-    console.error(`[API:transcode][${requestId}] Unhandled error:`, error)
+    // Decrement counter if an error occurred before the finally block was reached
+    // (e.g., during initial parameter validation)
+    if (ongoingRequests > 0) { // Check to prevent double decrement
+      ongoingRequests--
+      console.log(`[API:transcode][${requestId}] Decremented request counter in catch block to ${ongoingRequests}`)
+    }
+    
+    console.error(`[API:transcode][${requestId}] Unhandled error in GET handler:`, error)
     
     // Ensure we return proper JSON to avoid HTML responses
     return NextResponse.json(
       { 
         success: false, 
-        message: error instanceof Error ? 
-          (error.message.includes('403') || error.message.includes('forbidden') 
-            ? 'YouTube is blocking this download. Please try again or use the alternative download options.' 
-            : error.message) 
-          : 'Unknown error occurred',
+        message: error instanceof Error ? error.message : 'Unknown error occurred',
         timestamp: new Date().toISOString(),
         errorType: error instanceof Error ? error.name : 'Unknown'
       },
