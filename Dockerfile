@@ -49,13 +49,22 @@ ENV NODE_ENV=production
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
 
-# Install runtime OS dependencies ONLY (ffmpeg, yt-dlp)
-# Build dependencies are NOT needed here
-RUN apk add --no-cache ffmpeg yt-dlp
+# Install runtime OS dependencies: ffmpeg, python3, pip
+# yt-dlp will be installed via pip for the latest version
+RUN apk add --no-cache ffmpeg python3 py3-pip
 
-# Set paths explicitly (standard location after apk add)
-ENV YT_DLP_PATH=/usr/bin/yt-dlp
+# Install/Update yt-dlp using pip, overriding the externally managed environment check
+RUN pip install --upgrade --break-system-packages yt-dlp
+
+# Set paths explicitly (standard location after apk add / pip install)
+# Find yt-dlp path (usually /usr/bin/yt-dlp or /usr/local/bin/yt-dlp after pip)
+# We'll set a common one, but it might need adjustment if pip installs elsewhere in Alpine
+# pip usually installs to /usr/local/bin/
+ENV YT_DLP_PATH=/usr/local/bin/yt-dlp 
 ENV FFMPEG_PATH=/usr/bin/ffmpeg
+
+# Verify paths (optional, for debugging)
+# RUN ls -l /usr/bin/ffmpeg /usr/local/bin/yt-dlp || true
 
 # Copy built application artifacts from builder
 # First, copy the standalone output which includes necessary node_modules
