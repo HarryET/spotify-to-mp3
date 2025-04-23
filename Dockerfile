@@ -57,8 +57,15 @@ RUN apk add --no-cache ffmpeg yt-dlp
 ENV YT_DLP_PATH=/usr/bin/yt-dlp
 ENV FFMPEG_PATH=/usr/bin/ffmpeg
 
-# Copy built application artifacts
+# Copy built application artifacts from builder
+# First, copy the standalone output which includes necessary node_modules
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+
+# Explicitly copy youtubei.js to ensure all its files are present
+# This might overwrite parts of the node_modules copied by standalone, but ensures this specific dependency is complete.
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/youtubei.js ./node_modules/youtubei.js
+
+# Copy static assets and public folder
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 
