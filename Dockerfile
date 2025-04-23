@@ -64,15 +64,11 @@ RUN YT_DLP_INSTALL_PATH=$(which yt-dlp) && \
 
 # Set paths explicitly
 # Using /usr/local/bin as the most common pip install location
-ENV YT_DLP_PATH=/usr/local/bin/yt-dlp 
-ENV FFMPEG_PATH=/usr/bin/ffmpeg
+ENV YT_DLP_PATH=$(which yt-dlp)
+ENV FFMPEG_PATH=$(which ffmpeg)
 
 # Add /usr/local/bin to the system PATH to help find pip-installed packages
 ENV PATH /usr/local/bin:$PATH
-
-# Verify paths (optional, for debugging)
-# RUN ls -l /usr/bin/ffmpeg /usr/local/bin/yt-dlp || true
-# RUN echo $PATH
 
 # Copy built application artifacts from builder
 # First, copy the standalone output which includes necessary node_modules
