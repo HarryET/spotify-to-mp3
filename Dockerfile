@@ -56,15 +56,23 @@ RUN apk add --no-cache ffmpeg python3 py3-pip
 # Install/Update yt-dlp using pip, overriding the externally managed environment check
 RUN pip install --upgrade --break-system-packages yt-dlp
 
-# Set paths explicitly (standard location after apk add / pip install)
-# Find yt-dlp path (usually /usr/bin/yt-dlp or /usr/local/bin/yt-dlp after pip)
-# We'll set a common one, but it might need adjustment if pip installs elsewhere in Alpine
-# pip usually installs to /usr/local/bin/
+# Ensure yt-dlp is executable by all users
+# Find the actual path pip installed yt-dlp to
+RUN YT_DLP_INSTALL_PATH=$(which yt-dlp) && \
+    echo "yt-dlp found at: $YT_DLP_INSTALL_PATH" && \
+    chmod a+x "$YT_DLP_INSTALL_PATH"
+
+# Set paths explicitly
+# Using /usr/local/bin as the most common pip install location
 ENV YT_DLP_PATH=/usr/local/bin/yt-dlp 
 ENV FFMPEG_PATH=/usr/bin/ffmpeg
 
+# Add /usr/local/bin to the system PATH to help find pip-installed packages
+ENV PATH /usr/local/bin:$PATH
+
 # Verify paths (optional, for debugging)
 # RUN ls -l /usr/bin/ffmpeg /usr/local/bin/yt-dlp || true
+# RUN echo $PATH
 
 # Copy built application artifacts from builder
 # First, copy the standalone output which includes necessary node_modules
